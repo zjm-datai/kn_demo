@@ -1,70 +1,76 @@
+# core/audio_model.py
+
 import logging
-from typing import Optional
-import aiohttp
-from aiohttp import ClientTimeout
 import json
+from typing import Optional
+
+import aiohttp
+from aiohttp import ClientTimeout, TCPConnector, TraceConfig, ClientSession
 
 from config import config
 
 logger = logging.getLogger(__name__)
 
 class SttModel:
+    _session: Optional[ClientSession] = None
+
     def __init__(
         self,
         api_key: Optional[str] = None,
         api_url: Optional[str] = None,
-        # model_name: Optional[str] = "Qwen2-Audio-7B-Lora"
         model_name: Optional[str] = "qwen2-audio-lora-fy-2"
     ):
+        # 配置 API 凭据和地址
         self.api_key = api_key or config.QWEN2_AUDIO_API_KEY
         if not self.api_key:
             raise ValueError("Qwen2-Audio API key is required.")
         self.api_url = api_url or config.QWEN2_AUDIO_API_URL
         self.model_name = model_name
 
+        # 如果 class-level Session 不存在或已关闭，则创建一个
+        if not SttModel._session or SttModel._session.closed:
+            timeout = ClientTimeout(total=30, connect=10, sock_read=20)
+            # 无限并发连接，长连接保持 5 分钟
+            # 后续再建立的长连接也是五分钟
+            connector = TCPConnector(limit=0, keepalive_timeout=300)
+
+            # 可选：TraceConfig 用于细粒度请求日志
+            trace = TraceConfig()
+            trace.on_request_start.append(self._on_request_start)
+            trace.on_request_end.append(self._on_request_end)
+
+            SttModel._session = aiohttp.ClientSession(
+                timeout=timeout,
+                connector=connector,
+                trace_configs=[trace]
+            )
+            logger.info("已初始化全局 aiohttp.ClientSession（单例）")
+
+    @staticmethod
+    async def _on_request_start(session, ctx, params):
+        logger.debug(f"→ [TRACE] Starting {params.method} {params.url}")
+
+    @staticmethod
+    async def _on_request_end(session, ctx, params):
+        logger.debug(f"← [TRACE] Completed with status {params.response.status}")
+
+    @property
+    def session(self) -> ClientSession:
+        return SttModel._session  # 方便类型提示
+
     async def transcribe_audio(self, audio_url: str) -> str:
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}"
         }
-
-        # payload = {
-        #     "model": self.model_name,
-        #     "messages": [
-        #         {
-        #             "role": "user",
-        #             "content": [
-        #                 {
-        #                     "type": "audio_url",
-        #                     "audio_url": {"url": audio_url}
-        #                 },
-        #                 {
-        #                     "type": "text",
-        #                     "text": "直接转录为文本"
-        #                 }
-        #             ]
-        #         }
-        #     ],
-        #     "max_tokens": 500,
-        #     "presence_penalty": 0.1,
-        #     "frequency_penalty": 0.2,
-        #     "stream": False
-        # }
-
         payload = {
             "model": self.model_name,
             "messages": [
                 {
                     "role": "user",
                     "content": [
-                        {
-                            "type": "audio_url",
-                            "audio_url": audio_url
-                        },
-                        {
-                            "type": "text",
-                            "text": "直接转录为文本"
-                        }
+                        {"type": "audio_url", "audio_url": audio_url},
+                        {"type": "text", "text": "直接转录为文本"}
                     ]
                 }
             ],
@@ -74,46 +80,46 @@ class SttModel:
             "stream": False
         }
 
-        logger.debug("开始请求音频转录接口")
+        logger.info("开始请求音频转录接口")
+        async with self.session.post(self.api_url, json=payload, headers=headers) as resp:
 
-        # 比如：connect 最多 10s，recv body 最多 60s，总超时 70s
-        timeout = ClientTimeout(total=70, connect=10, sock_read=60)
+            """
+            logger.info("请求已发出，等待服务器返回……") 这行日志会在 async with self.session.post(…) as resp 上下文管理器的 __aenter__ 完成后 立即执行，也就是：
+            
+            - 发送完请求（包括请求头和请求体）
+            - 接收到响应的状态行和响应头
+            - 上下文管理器 __aenter__ 返回 resp 对象
+            - 然后才进入 async with 代码块，打印该日志
+            - 随后才执行 await resp.text() 读取响应体
 
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(self.api_url, json=payload, headers=headers) as response:
-                logger.debug(f"请求已发出，等待服务器返回……")
-                # 先拿到原始文本（无视 Content-Type）
-                raw_text = await response.text()
+            换句话说，如果服务器在响应头阶段（status + headers）很慢，__aenter__ 阶段就会被阻塞，
+            直到接收到响应头或超时为止；只有一旦响应头到齐，才会打印 “请求已发出，等待服务器返回……”。
+            
+            所以说如果卡在只打印开始请求音频接口的日志，，没有打印请求已发出，不是我们的问题，而是音频接口那边迟迟没有响应的问题！
+            """
 
-                logger.debug(f"拿到原始返回（{len(raw_text)} bytes）")
-                
-                # 如果状态码不是 200，就详尽地输出错误信息
-                if response.status != 200:
-                    error_body = None
-                    # 尝试直接解析 JSON（跳过 content-type 检查）
-                    try:
-                        error_body = await response.json(content_type=None)
-                    except Exception:
-                        # 再退一步，当作纯文本看
-                        error_body = raw_text or "<empty response>"
-                    
-                    logger.error(
-                        f"调用语音模型接口返回错误 -- "
-                        f"status={response.status} reason={response.reason} "
-                        f"headers={dict(response.headers)} "
-                        f"body={error_body!r}"
-                    )
-                    raise Exception(f"Qwen2-Audio API error ({response.status}): {error_body!r}")
-
-                # 3. 状态码 200，打印原始文本并尝试解析
-                logger.debug(f"Raw response text: {raw_text!r}")
+            logger.info("请求已发出，等待服务器返回……")
+            raw = await resp.text()
+            if resp.status != 200:
+                # 尝试解析 JSON 错误
                 try:
-                    result = json.loads(raw_text)
-                except json.JSONDecodeError:
-                    raise Exception(f"Unexpected non-JSON response: {raw_text!r}")
+                    err = await resp.json(content_type=None)
+                except Exception:
+                    err = raw or "<empty>"
+                logger.error(f"API error {resp.status}: {err!r}")
+                raise Exception(f"Qwen2-Audio API error ({resp.status}): {err!r}")
 
-                logger.debug(f"得到转录文本内容：{result}")
-                return result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            data = json.loads(raw)
+            text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            logger.info(f"转录结果：{text!r}")
+            return text
+
+    @classmethod
+    async def close_session(cls):
+        if cls._session and not cls._session.closed:
+            await cls._session.close()
+            logger.info("全局 aiohttp.ClientSession 已关闭")
 
 def get_stt_model() -> SttModel:
+    """FastAPI 依赖注入工厂，始终返回同一实例（复用 Session）"""
     return SttModel()
