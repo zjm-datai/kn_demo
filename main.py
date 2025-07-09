@@ -1,5 +1,6 @@
 # main.py
-
+import os
+import time
 import logging
 from contextlib import asynccontextmanager
 
@@ -16,9 +17,13 @@ for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
     lg.handlers.clear()
     lg.propagate = False
 
-# 日志配置
+# 设置时区为北京时间（Asia/Shanghai），并应用
+os.environ['TZ'] = 'Asia/Shanghai'
+time.tzset()  # 使 os.environ['TZ'] 立即生效 :contentReference[oaicite:0]{index=0}
+
+# 日志格式：加入 %z 显示时区偏移（+0800）
 LOG_FORMAT = "[%(asctime)s] [%(levelname)s] [%(name)s:%(lineno)d] - %(message)s"
-DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+DATE_FORMAT = "%Y-%m-%d %H:%M:%S %z"  # 若想显示时区名称可用 %Z :contentReference[oaicite:1]{index=1}
 
 logging.basicConfig(
     level=logging.INFO,
