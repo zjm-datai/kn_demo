@@ -31,5 +31,3 @@ class Config(MinioConfig, Qwen2AudioConfig):
         env_file_encoding="utf-8",  # 文件编码
         extra="ignore"  # 忽略额外的环境变量
     )
-
-config = Config()

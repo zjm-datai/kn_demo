@@ -1,0 +1,13 @@
+
+services:
+  kn_demo:
+    image: kn_demo:latest
+    container_name: kn_demo
+    env_file:
+      - .env
+    environment:
+      # 如果 .env 中没有设置 UV_WORKERS，则默认使用 4 个 worker
+      UV_WORKERS: "${UV_WORKERS:-4}"
+    ports:
+      - "30017:8000"
+    restart: unless-stopped

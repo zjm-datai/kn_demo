@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from core.minio_client import MinioClient, get_minio_client
 from core.audio_model import SttModel, get_stt_model
+from router import ui
 
 # 设置日志格式
 LOG_FORMAT = "[%(asctime)s] [%(levelname)s] [%(name)s:%(lineno)d] - %(message)s"
@@ -49,6 +50,8 @@ async def upload_file(
         return TranscriptionResponse(transcription=transcription)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+ui.register(app=app)
     
 if __name__ == "__main__":
     import uvicorn
